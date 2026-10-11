@@ -29,6 +29,7 @@ interface Pending {
     c2: string;
     icon: string | null; // data URI
 }
+const DEFAULTS: Pending = { style: 0, solid: "#5865F2", c1: "#5865F2", c2: "#EB459E", icon: null };
 let pending: Pending | null = null;
 
 function guildHasFeature(guildId: string | undefined, feature: string): boolean {
@@ -54,8 +55,11 @@ async function urlToDataUri(uri: string): Promise<string> {
 
 // Merge our fields into Discord's own create/edit role request
 const ROLE_URL = /^\/guilds\/\d+\/roles(\/\d+)?$/;
-function mergeIntoRequest(req: any) {
+function mergeIntoRequest(req: any, method = "?") {
     try {
+        if (req && typeof req.url === "string" && /roles/.test(req.url)) {
+            record("http", `${method} ${req.url.replace(/\d{15,}/g, "{id}")} keys=${Object.keys(req.body ?? {}).join(",")} pending=${!!pending}`);
+        }
         if (!pending || !req || typeof req.url !== "string") return;
         if (!ROLE_URL.test(req.url.split("?")[0])) return;
         const body = (req.body = req.body ?? {});
@@ -75,29 +79,30 @@ function mergeIntoRequest(req: any) {
             body.unicode_emoji = null;
         }
         record("request", `${req.url} merged style=${p.style} icon=${!!p.icon}`);
+        pending = null;
     } catch (e) {
         logger.error("[RoleUtilities] merge failed", e);
     }
 }
 
 // The extra UI injected into the role scene
-function RoleExtras({ guildId }: { guildId?: string }) {
+function RoleStyleSheet({ guildId }: { guildId?: string }) {
     const gid = guildId ?? SelectedGuildStore?.getGuildId?.();
     const canGradient = boostTier(gid) >= 3 || guildHasFeature(gid, "ENHANCED_ROLE_COLORS");
     const canIcon = boostTier(gid) >= 2 || guildHasFeature(gid, "ROLE_ICONS");
 
-    const [style, setStyle] = React.useState(STYLE.SOLID);
-    const [solid, setSolid] = React.useState("#5865F2");
-    const [c1, setC1] = React.useState("#5865F2");
-    const [c2, setC2] = React.useState("#EB459E");
+    const init = pending ?? DEFAULTS;
+    const [style, setStyle] = React.useState(init.style);
+    const [solid, setSolid] = React.useState(init.solid);
+    const [c1, setC1] = React.useState(init.c1);
+    const [c2, setC2] = React.useState(init.c2);
     const [iconUrl, setIconUrl] = React.useState("");
-    const [icon, setIcon] = React.useState<string | null>(null);
+    const [icon, setIcon] = React.useState<string | null>(init.icon);
     const [loading, setLoading] = React.useState(false);
     const [openPicker, setOpenPicker] = React.useState<null | "solid" | "c1" | "c2">(null);
 
     // keep the shared state in sync; clear on unmount
     React.useEffect(() => { pending = { style, solid, c1, c2, icon }; }, [style, solid, c1, c2, icon]);
-    React.useEffect(() => () => { pending = null; }, []);
 
     async function loadIcon() {
         if (!iconUrl.trim()) return;
@@ -134,15 +139,15 @@ function RoleExtras({ guildId }: { guildId?: string }) {
                     <Text style={{ color: "#dbdee1", fontWeight: "600", flex: 1 }}>{label}</Text>
                     <Text style={{ color: "#b5bac1" }}>{color}</Text>
                 </TouchableOpacity>
-                {open && <ColorPicker title={label} value={color} onChange={set} />}
+                {open && <ColorPicker title={label} hideTitle value={color} onChange={set} />}
             </View>
         );
     }
 
     return (
-        <View style={{
-            backgroundColor: "#1e1f22", marginHorizontal: 16, marginVertical: 16,
-            borderRadius: 12, padding: 16, borderWidth: 1, borderColor: "rgba(255,255,255,0.08)",
+        <ScrollView style={{ maxHeight: 560 }}><View style={{
+            backgroundColor: "#1e1f22", padding: 16, paddingBottom: 28,
+            borderTopLeftRadius: 16, borderTopRightRadius: 16,
         }}>
             <Text style={{ fontSize: 11, fontWeight: "700", color: "#b5bac1", marginBottom: 12, letterSpacing: 0.5 }}>
                 ROLE STYLE
@@ -209,9 +214,15 @@ function RoleExtras({ guildId }: { guildId?: string }) {
             )}
 
             <Text style={{ color: "#80848e", fontSize: 11, marginTop: 12 }}>
-                Applied automatically when you save the role.
+                Applied when you tap Create on the role screen.
             </Text>
-        </View>
+            <TouchableOpacity
+                onPress={() => { try { ActionSheet.hideActionSheet("RoleUtilsSheet"); } catch { try { ActionSheet.hideActionSheet(); } catch {} } }}
+                style={{ marginTop: 12, backgroundColor: "#5865F2", borderRadius: 8, paddingVertical: 12, alignItems: "center" }}
+            >
+                <Text style={{ color: "#fff", fontWeight: "700" }}>Done</Text>
+            </TouchableOpacity>
+        </View></ScrollView>
     );
 }
 
@@ -257,20 +268,8 @@ function Settings() {
     );
 }
 
-// Walk the returned tree: find a scroll container to append into
-const SCROLL_NAME = /scroll|flatlist|sectionlist/i;
 function typeName(t: any): string {
     return (typeof t === "string" ? t : nameOf(t)) ?? "";
-}
-function findScroll(node: any, depth = 0): any {
-    if (!node || typeof node !== "object" || depth > 25) return null;
-    if (Array.isArray(node)) {
-        for (const n of node) { const r = findScroll(n, depth + 1); if (r) return r; }
-        return null;
-    }
-    if (node.props && SCROLL_NAME.test(typeName(node.type))) return node;
-    if (node.props?.children) return findScroll(node.props.children, depth + 1);
-    return null;
 }
 function dumpTree(node: any, depth = 0, out: string[] = []): string[] {
     if (!node || typeof node !== "object" || depth > 7 || out.length > 60) return out;
@@ -279,49 +278,7 @@ function dumpTree(node: any, depth = 0, out: string[] = []): string[] {
     if (node.props?.children) dumpTree(node.props.children, depth + 1, out);
     return out;
 }
-
 let dumped = false;
-function injectInto(ret: any, props: any) {
-    if (!ret) return ret;
-    if (!dumped) {
-        dumped = true;
-        record("tree", "\n" + dumpTree(ret).join("\n"));
-        record("props", Object.keys(props ?? {}).join(","));
-    }
-    const extras = React.createElement(RoleExtras, { key: "roleutils-extras", guildId: props?.guildId });
-    const scroll = findScroll(ret);
-
-    try {
-        if (scroll) {
-            if (scroll.props.data && scroll.props.renderItem) {
-                // list-style container
-                const Old = scroll.props.ListFooterComponent;
-                scroll.props.ListFooterComponent = () => (
-                    <View>
-                        {Old ? (typeof Old === "function" ? <Old /> : Old) : null}
-                        {extras}
-                    </View>
-                );
-            } else {
-                const kids = scroll.props.children;
-                const arr = Array.isArray(kids) ? [...kids] : kids != null ? [kids] : [];
-                if (!arr.some((k: any) => k?.key === "roleutils-extras")) arr.push(extras);
-                scroll.props.children = arr;
-            }
-            return ret;
-        }
-    } catch (e) {
-        logger.error("[RoleUtilities] inject failed, using fallback", e);
-    }
-
-    // fallback: show our section under the scene in its own scroll area
-    return (
-        <View style={{ flex: 1 }}>
-            <View style={{ flex: 1 }}>{ret}</View>
-            <ScrollView style={{ maxHeight: 340 }}>{extras}</ScrollView>
-        </View>
-    );
-}
 
 // Wrap the scene's component at render time (it is not reachable via findByName)
 const SCENE_NAMES = new Set(SCENES);
@@ -348,7 +305,12 @@ function getWrapper(type: any, name: string) {
         wrappers.set(type, null);
         return null;
     }
-    const Wrapped: any = (props: any) => injectInto(render(props), props);
+    const Wrapped: any = (props: any) => {
+        const ret = render(props);
+        React.useEffect(() => () => { pending = null; }, []);
+        if (!dumped) { dumped = true; record("tree", "\n" + dumpTree(ret).join("\n")); record("props", Object.keys(props ?? {}).join(",")); }
+        return ret;
+    };
     Wrapped.displayName = name;
     Wrapped.__roleutils = true;
     wrappers.set(type, Wrapped);
@@ -383,8 +345,19 @@ export default {
             } else record("scene", "jsx runtime not found");
         } catch (e) { record("scene", "jsx patch failed: " + String(e)); }
 
-        patches.push(before("post", RestAPI, ([req]: any[]) => mergeIntoRequest(req)));
-        patches.push(before("patch", RestAPI, ([req]: any[]) => mergeIntoRequest(req)));
+        patches.push(before("openLazy", ActionSheet, (args: any[]) => {
+            if (args[1] !== "RoleColorPicker") return;
+            const ctx = args[2];
+            record("sheet-props", Object.keys(ctx ?? {}).join(","));
+            const Sheet = (p: any) => React.createElement(RoleStyleSheet, { guildId: ctx?.guildId ?? p?.guildId });
+            return [Promise.resolve({ default: Sheet }), "RoleUtilsSheet", ctx];
+        }));
+
+        for (const m of ["post", "patch", "put"]) {
+            if (typeof RestAPI?.[m] === "function") {
+                patches.push(before(m, RestAPI, ([req]: any[]) => mergeIntoRequest(req, m.toUpperCase())));
+            }
+        }
         logger.log("[RoleUtilities] Loaded.");
     },
 
