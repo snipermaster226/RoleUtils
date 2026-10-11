@@ -46,7 +46,7 @@ const plugins = [
 ];
 
 const manifest = JSON.parse(await readFile(`./manifest.json`));
-const outPath = `./dist/index.js`;
+const outPath = `./dist/RoleUtilities/index.js`;
 
 try {
     const bundle = await rollup({
@@ -75,7 +75,7 @@ try {
     const toHash = await readFile(outPath);
     manifest.hash = createHash("sha256").update(toHash).digest("hex");
     manifest.main = "index.js";
-    await writeFile(`./dist/manifest.json`, JSON.stringify(manifest));
+    await writeFile(`./dist/RoleUtilities/manifest.json`, JSON.stringify(manifest));
 
     console.log(`Successfully built ${manifest.name}!`);
 } catch (e) {
