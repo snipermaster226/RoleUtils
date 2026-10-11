@@ -1,4 +1,4 @@
-import { findByProps, findByName } from "@vendetta/metro";
+import { findByProps } from "@vendetta/metro";
 import { after, before } from "@vendetta/patcher";
 import { React, ReactNative, clipboard } from "@vendetta/metro/common";
 import { showToast } from "@vendetta/ui/toasts";
@@ -323,15 +323,46 @@ function injectInto(ret: any, props: any) {
     );
 }
 
-function patchScene(name: string): (() => void) | null {
-    const mod = findByName(name, false);
-    if (!mod) { record("scene", `${name}: not found`); return null; }
-    if (typeof mod.default === "function") {
-        record("scene", `${name}: patching default`);
-        return after("default", mod, (args: any[], ret: any) => injectInto(ret, args[0]));
+// Wrap the scene's component at render time (it is not reachable via findByName)
+const SCENE_NAMES = new Set(SCENES);
+const wrappers = new WeakMap<any, any>();
+
+function resolveRender(type: any): ((props: any) => any) | null {
+    if (!type) return null;
+    if (typeof type === "function") {
+        return type.prototype?.isReactComponent ? null : (p: any) => type(p);
     }
-    record("scene", `${name}: found but default is ${typeof mod.default}`);
+    if (typeof type === "object") {
+        if (typeof type.render === "function") return (p: any) => type.render(p, null); // forwardRef
+        if (type.type) return resolveRender(type.type); // memo
+    }
     return null;
+}
+
+function getWrapper(type: any, name: string) {
+    let w = wrappers.get(type);
+    if (w !== undefined) return w;
+    const render = resolveRender(type);
+    if (!render) {
+        record("scene", `${name}: cannot wrap (class component or unknown type)`);
+        wrappers.set(type, null);
+        return null;
+    }
+    const Wrapped: any = (props: any) => injectInto(render(props), props);
+    Wrapped.displayName = name;
+    Wrapped.__roleutils = true;
+    wrappers.set(type, Wrapped);
+    record("scene", `${name}: wrapped`);
+    return Wrapped;
+}
+
+function swapScene(args: any[]) {
+    const type = args[0];
+    if (!type || type.__roleutils) return;
+    const n = nameOf(type);
+    if (!n || !SCENE_NAMES.has(n)) return;
+    const w = getWrapper(type, n);
+    if (w) return [w, ...args.slice(1)];
 }
 
 let patches: (() => void)[] = [];
@@ -341,14 +372,16 @@ export default {
     onLoad() {
         patches.push(after("openLazy", ActionSheet, ([, key]) => { record("openLazy", String(key)); }));
 
-        for (const name of SCENES) {
-            try {
-                const p = patchScene(name);
-                if (p) patches.push(p);
-            } catch (e) {
-                record("scene", `${name}: patch threw ${String(e)}`);
-            }
-        }
+        try {
+            patches.push(before("createElement", React, swapScene as any));
+        } catch (e) { record("scene", "createElement patch failed: " + String(e)); }
+        try {
+            const jsxRt = findByProps("jsx", "jsxs");
+            if (jsxRt) {
+                patches.push(before("jsx", jsxRt, swapScene as any));
+                patches.push(before("jsxs", jsxRt, swapScene as any));
+            } else record("scene", "jsx runtime not found");
+        } catch (e) { record("scene", "jsx patch failed: " + String(e)); }
 
         patches.push(before("post", RestAPI, ([req]: any[]) => mergeIntoRequest(req)));
         patches.push(before("patch", RestAPI, ([req]: any[]) => mergeIntoRequest(req)));
