@@ -332,6 +332,7 @@ let patches: (() => void)[] = [];
 export default {
     settings: Settings,
     onLoad() {
+        record("build", "v3b sheet-swap (no scene injection)");
         patches.push(after("openLazy", ActionSheet, ([, key]) => { record("openLazy", String(key)); }));
 
         try {
