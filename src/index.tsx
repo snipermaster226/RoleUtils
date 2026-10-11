@@ -85,6 +85,20 @@ function mergeIntoRequest(req: any, method = "?") {
     }
 }
 
+let sheetCtx: any = null;
+function closeSheet() {
+    const tries: [string, () => void][] = [
+        ["ctx.onClose", () => sheetCtx?.onClose?.()],
+        ["hide(key)", () => ActionSheet.hideActionSheet("RoleUtilsSheet")],
+        ["hide()", () => ActionSheet.hideActionSheet()],
+        ["hide(orig)", () => ActionSheet.hideActionSheet("RoleColorPicker")],
+        ["hideSafely", () => ActionSheet.hideActionSheetSafely?.()],
+    ];
+    for (const [name, fn] of tries) {
+        try { fn(); record("close", `${name} ok`); } catch (e) { record("close", `${name} threw ${String(e)}`); }
+    }
+}
+
 // The extra UI injected into the role scene
 function RoleStyleSheet({ guildId }: { guildId?: string }) {
     const gid = guildId ?? SelectedGuildStore?.getGuildId?.();
@@ -217,7 +231,7 @@ function RoleStyleSheet({ guildId }: { guildId?: string }) {
                 Applied when you tap Create on the role screen.
             </Text>
             <TouchableOpacity
-                onPress={() => { try { ActionSheet.hideActionSheet("RoleUtilsSheet"); } catch { try { ActionSheet.hideActionSheet(); } catch {} } }}
+                onPress={closeSheet}
                 style={{ marginTop: 12, backgroundColor: "#5865F2", borderRadius: 8, paddingVertical: 12, alignItems: "center" }}
             >
                 <Text style={{ color: "#fff", fontWeight: "700" }}>Done</Text>
@@ -332,7 +346,7 @@ let patches: (() => void)[] = [];
 export default {
     settings: Settings,
     onLoad() {
-        record("build", "v3b sheet-swap (no scene injection)");
+        record("build", "v3c closer + logging");
         patches.push(after("openLazy", ActionSheet, ([, key]) => { record("openLazy", String(key)); }));
 
         try {
@@ -349,6 +363,7 @@ export default {
         patches.push(before("openLazy", ActionSheet, (args: any[]) => {
             if (args[1] !== "RoleColorPicker") return;
             const ctx = args[2];
+            sheetCtx = ctx;
             record("sheet-props", Object.keys(ctx ?? {}).join(","));
             const Sheet = (p: any) => React.createElement(RoleStyleSheet, { guildId: ctx?.guildId ?? p?.guildId });
             return [Promise.resolve({ default: Sheet }), "RoleUtilsSheet", ctx];
