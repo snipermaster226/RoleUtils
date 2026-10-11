@@ -1,12 +1,12 @@
 import { findByProps } from "@vendetta/metro";
-import { after, before } from "@vendetta/patcher";
+import { after, before, instead } from "@vendetta/patcher";
 import { React, ReactNative, clipboard } from "@vendetta/metro/common";
 import { showToast } from "@vendetta/ui/toasts";
 import { logger } from "@vendetta";
 import ColorPicker from "./ui/ColorPicker";
 import { isValidHex, hexToInt } from "./lib/color";
 
-const { View, Text, TouchableOpacity, ScrollView, TextInput } = ReactNative;
+const { View, Text, TouchableOpacity, ScrollView, TextInput, Modal } = ReactNative;
 
 const RestAPI = findByProps("get", "post", "del", "patch");
 const GuildStore = findByProps("getGuild");
@@ -85,22 +85,11 @@ function mergeIntoRequest(req: any, method = "?") {
     }
 }
 
-let sheetCtx: any = null;
-function closeSheet() {
-    const tries: [string, () => void][] = [
-        ["ctx.onClose", () => sheetCtx?.onClose?.()],
-        ["hide(key)", () => ActionSheet.hideActionSheet("RoleUtilsSheet")],
-        ["hide()", () => ActionSheet.hideActionSheet()],
-        ["hide(orig)", () => ActionSheet.hideActionSheet("RoleColorPicker")],
-        ["hideSafely", () => ActionSheet.hideActionSheetSafely?.()],
-    ];
-    for (const [name, fn] of tries) {
-        try { fn(); record("close", `${name} ok`); } catch (e) { record("close", `${name} threw ${String(e)}`); }
-    }
-}
+// set by the mounted Create Role scene; opens our modal
+let openStyleModal: (() => void) | null = null;
 
 // The extra UI injected into the role scene
-function RoleStyleSheet({ guildId }: { guildId?: string }) {
+function RoleStyleSheet({ guildId, onClose }: { guildId?: string; onClose: () => void }) {
     const gid = guildId ?? SelectedGuildStore?.getGuildId?.();
     const canGradient = boostTier(gid) >= 3 || guildHasFeature(gid, "ENHANCED_ROLE_COLORS");
     const canIcon = boostTier(gid) >= 2 || guildHasFeature(gid, "ROLE_ICONS");
@@ -159,7 +148,7 @@ function RoleStyleSheet({ guildId }: { guildId?: string }) {
     }
 
     return (
-        <ScrollView style={{ maxHeight: 560 }}><View style={{
+        <ScrollView style={{ maxHeight: 520 }} keyboardShouldPersistTaps="handled"><View style={{
             backgroundColor: "#1e1f22", padding: 16, paddingBottom: 28,
             borderTopLeftRadius: 16, borderTopRightRadius: 16,
         }}>
@@ -231,12 +220,27 @@ function RoleStyleSheet({ guildId }: { guildId?: string }) {
                 Applied when you tap Create on the role screen.
             </Text>
             <TouchableOpacity
-                onPress={closeSheet}
+                onPress={onClose}
                 style={{ marginTop: 12, backgroundColor: "#5865F2", borderRadius: 8, paddingVertical: 12, alignItems: "center" }}
             >
                 <Text style={{ color: "#fff", fontWeight: "700" }}>Done</Text>
             </TouchableOpacity>
         </View></ScrollView>
+    );
+}
+
+function StyleModal({ visible, onClose, guildId }: { visible: boolean; onClose: () => void; guildId?: string }) {
+    return (
+        <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose} statusBarTranslucent>
+            <View style={{ flex: 1, justifyContent: "flex-end" }}>
+                <TouchableOpacity
+                    activeOpacity={1}
+                    onPress={onClose}
+                    style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.55)" }}
+                />
+                <RoleStyleSheet guildId={guildId} onClose={onClose} />
+            </View>
+        </Modal>
     );
 }
 
@@ -321,9 +325,18 @@ function getWrapper(type: any, name: string) {
     }
     const Wrapped: any = (props: any) => {
         const ret = render(props);
-        React.useEffect(() => () => { pending = null; }, []);
+        const [open, setOpen] = React.useState(false);
+        React.useEffect(() => {
+            openStyleModal = () => setOpen(true);
+            return () => { openStyleModal = null; pending = null; };
+        }, []);
         if (!dumped) { dumped = true; record("tree", "\n" + dumpTree(ret).join("\n")); record("props", Object.keys(props ?? {}).join(",")); }
-        return ret;
+        return React.createElement(
+            React.Fragment,
+            null,
+            ret,
+            React.createElement(StyleModal, { visible: open, onClose: () => setOpen(false), guildId: props?.guildId })
+        );
     };
     Wrapped.displayName = name;
     Wrapped.__roleutils = true;
@@ -346,7 +359,7 @@ let patches: (() => void)[] = [];
 export default {
     settings: Settings,
     onLoad() {
-        record("build", "v3c closer + logging");
+        record("build", "v4 modal");
         patches.push(after("openLazy", ActionSheet, ([, key]) => { record("openLazy", String(key)); }));
 
         try {
@@ -360,13 +373,13 @@ export default {
             } else record("scene", "jsx runtime not found");
         } catch (e) { record("scene", "jsx patch failed: " + String(e)); }
 
-        patches.push(before("openLazy", ActionSheet, (args: any[]) => {
-            if (args[1] !== "RoleColorPicker") return;
-            const ctx = args[2];
-            sheetCtx = ctx;
-            record("sheet-props", Object.keys(ctx ?? {}).join(","));
-            const Sheet = (p: any) => React.createElement(RoleStyleSheet, { guildId: ctx?.guildId ?? p?.guildId });
-            return [Promise.resolve({ default: Sheet }), "RoleUtilsSheet", ctx];
+        patches.push(instead("openLazy", ActionSheet, (args: any[], orig: any) => {
+            if (args[1] === "RoleColorPicker" && openStyleModal) {
+                record("sheet", "RoleColorPicker intercepted");
+                openStyleModal();
+                return;
+            }
+            return orig(...args);
         }));
 
         for (const m of ["post", "patch", "put"]) {
