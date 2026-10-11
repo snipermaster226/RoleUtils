@@ -14,15 +14,16 @@ interface ColorPickerProps {
     title: string;
     value: string;
     onChange: (hex: string) => void;
+    hideTitle?: boolean;
 }
 
-export default function ColorPicker({ title, value, onChange }: ColorPickerProps) {
+export default function ColorPicker({ title, value, onChange, hideTitle }: ColorPickerProps) {
     const valid = !value || isValidHex(value);
     const swatchColor = isValidHex(value) ? value : "#5865F2";
 
     return (
         <View style={{ marginVertical: 8 }}>
-            <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 8 }}>
+            {!hideTitle && <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 8 }}>
                 <View
                     style={{
                         width: 24,
@@ -35,7 +36,7 @@ export default function ColorPicker({ title, value, onChange }: ColorPickerProps
                     }}
                 />
                 <Text style={{ fontSize: 15, fontWeight: "600", color: "#dbdee1" }}>{title}</Text>
-            </View>
+            </View>}
 
             <TextInput
                 value={value}
