@@ -29,6 +29,7 @@ interface Pending {
     c2: string;
     icon: string | null; // data URI
 }
+let pendingAt = 0;
 const DEFAULTS: Pending = { style: 0, solid: "#5865F2", c1: "#5865F2", c2: "#EB459E", icon: null };
 let pending: Pending | null = null;
 
@@ -60,6 +61,7 @@ function mergeIntoRequest(req: any, method = "?") {
         if (req && typeof req.url === "string" && /roles/.test(req.url)) {
             record("http", `${method} ${req.url.replace(/\d{15,}/g, "{id}")} keys=${Object.keys(req.body ?? {}).join(",")} pending=${!!pending}`);
         }
+        if (pending && Date.now() - pendingAt > 10 * 60 * 1000) pending = null;
         if (!pending || !req || typeof req.url !== "string") return;
         if (!ROLE_URL.test(req.url.split("?")[0])) return;
         const body = (req.body = req.body ?? {});
@@ -105,7 +107,7 @@ function RoleStyleSheet({ guildId, onClose }: { guildId?: string; onClose: () =>
     const [openPicker, setOpenPicker] = React.useState<null | "solid" | "c1" | "c2">(null);
 
     // keep the shared state in sync; clear on unmount
-    React.useEffect(() => { pending = { style, solid, c1, c2, icon }; }, [style, solid, c1, c2, icon]);
+    React.useEffect(() => { pending = { style, solid, c1, c2, icon }; pendingAt = Date.now(); }, [style, solid, c1, c2, icon]);
 
     async function loadIcon() {
         if (!iconUrl.trim()) return;
@@ -148,9 +150,8 @@ function RoleStyleSheet({ guildId, onClose }: { guildId?: string; onClose: () =>
     }
 
     return (
-        <ScrollView style={{ maxHeight: 520 }} keyboardShouldPersistTaps="handled"><View style={{
-            backgroundColor: "#1e1f22", padding: 16, paddingBottom: 28,
-            borderTopLeftRadius: 16, borderTopRightRadius: 16,
+        <View style={{
+            padding: 16, paddingBottom: 28,
         }}>
             <Text style={{ fontSize: 11, fontWeight: "700", color: "#b5bac1", marginBottom: 12, letterSpacing: 0.5 }}>
                 ROLE STYLE
@@ -225,7 +226,7 @@ function RoleStyleSheet({ guildId, onClose }: { guildId?: string; onClose: () =>
             >
                 <Text style={{ color: "#fff", fontWeight: "700" }}>Done</Text>
             </TouchableOpacity>
-        </View></ScrollView>
+        </View>
     );
 }
 
@@ -354,32 +355,48 @@ function swapScene(args: any[]) {
     if (w) return [w, ...args.slice(1)];
 }
 
+const patchedMods = new WeakSet<object>();
+
+function hideSheet() {
+    try { ActionSheet.hideActionSheet(); } catch (e) { record("close", String(e)); }
+}
+
+function addToSheet(ret: any) {
+    const extra = React.createElement(View, { key: "roleutils-extra" },
+        React.createElement(RoleStyleSheet, { onClose: hideSheet })
+    );
+    try {
+        if (ret?.props) {
+            const kids = ret.props.children;
+            const arr = Array.isArray(kids) ? [...kids] : kids != null ? [kids] : [];
+            if (!arr.some((k: any) => k?.key === "roleutils-extra")) arr.push(extra);
+            ret.props.children = arr;
+            return ret;
+        }
+    } catch (e) { record("sheet", "inject failed " + String(e)); }
+    return React.createElement(React.Fragment, null, ret, extra);
+}
+
 let patches: (() => void)[] = [];
 
 export default {
     settings: Settings,
     onLoad() {
-        record("build", "v4 modal");
+        record("build", "v5 inject into RoleColorPicker");
         patches.push(after("openLazy", ActionSheet, ([, key]) => { record("openLazy", String(key)); }));
 
-        try {
-            patches.push(before("createElement", React, swapScene as any));
-        } catch (e) { record("scene", "createElement patch failed: " + String(e)); }
-        try {
-            const jsxRt = findByProps("jsx", "jsxs");
-            if (jsxRt) {
-                patches.push(before("jsx", jsxRt, swapScene as any));
-                patches.push(before("jsxs", jsxRt, swapScene as any));
-            } else record("scene", "jsx runtime not found");
-        } catch (e) { record("scene", "jsx patch failed: " + String(e)); }
-
-        patches.push(instead("openLazy", ActionSheet, (args: any[], orig: any) => {
-            if (args[1] === "RoleColorPicker" && openStyleModal) {
-                record("sheet", "RoleColorPicker intercepted");
-                openStyleModal();
-                return;
-            }
-            return orig(...args);
+        // Add our controls inside Discord's own (dismissable) RoleColorPicker sheet
+        patches.push(after("openLazy", ActionSheet, ([lazy, key]: any[]) => {
+            if (key !== "RoleColorPicker" || !lazy?.then) return;
+            lazy.then((mod: any) => {
+                if (!mod || patchedMods.has(mod) || typeof mod.default !== "function") {
+                    if (mod && !patchedMods.has(mod)) record("sheet", "RoleColorPicker default is " + typeof mod?.default);
+                    return;
+                }
+                patchedMods.add(mod);
+                record("sheet", "patching RoleColorPicker");
+                patches.push(after("default", mod, (_: any, ret: any) => addToSheet(ret)));
+            }).catch((e: any) => record("sheet", "lazy failed " + String(e)));
         }));
 
         for (const m of ["post", "patch", "put"]) {
