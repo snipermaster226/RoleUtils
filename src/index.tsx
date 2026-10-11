@@ -1,6 +1,6 @@
 import { findByProps, findByName } from "@vendetta/metro";
 import { after } from "@vendetta/patcher";
-import { React, ReactNative } from "@vendetta/metro/common";
+import { React, ReactNative, clipboard } from "@vendetta/metro/common";
 import { findInReactTree } from "@vendetta/utils";
 import { showToast } from "@vendetta/ui/toasts";
 import { getAssetIDByName } from "@vendetta/ui/assets";
@@ -25,6 +25,12 @@ const ROLE_STYLE = {
 function getServerBoostTier(guildId: string): number {
     const guild = GuildStore?.getGuild?.(guildId);
     return guild?.premiumTier ?? 0;
+}
+
+function guildHasFeature(guildId: string, feature: string): boolean {
+    const f = GuildStore?.getGuild?.(guildId)?.features;
+    if (!f) return false;
+    return typeof f.has === "function" ? f.has(feature) : Array.isArray(f) && f.includes(feature);
 }
 
 async function updateRole(guildId: string, roleId: string, data: Record<string, any>) {
@@ -63,9 +69,9 @@ function RoleExtras({ guildId, roleId, initialColor }: { guildId: string; roleId
     const [gradientColor2, setGradientColor2] = React.useState<string>("#EB459E");
     const [saving, setSaving] = React.useState(false);
 
-    const canUseGradient = boostTier >= 3;
-    const canUseHolo = boostTier >= 3;
-    const canUseIcon = boostTier >= 2;
+    const canUseGradient = boostTier >= 3 || guildHasFeature(guildId, "ENHANCED_ROLE_COLORS");
+    const canUseHolo = canUseGradient;
+    const canUseIcon = boostTier >= 2 || guildHasFeature(guildId, "ROLE_ICONS");
 
     async function handleSave() {
         setSaving(true);
@@ -193,11 +199,76 @@ function RoleExtras({ guildId, roleId, initialColor }: { guildId: string; roleId
     );
 }
 
+// ---- Discovery mode: records what Discord opens so we can find the real role screen ----
+const discovered: string[] = [];
+function record(kind: string, name: string) {
+    const line = `${kind}: ${name}`;
+    if (discovered.includes(line)) return;
+    discovered.push(line);
+    logger.log("[RoleUtilities] " + line);
+}
+const NAME_FILTER = /role|permission|guildsettings|guild_settings/i;
+function nameOf(type: any): string | null {
+    if (!type) return null;
+    if (typeof type === "string") return null;
+    return type.displayName ?? type.name ?? type.type?.displayName ?? type.type?.name ?? type.render?.name ?? null;
+}
+
+function Settings() {
+    const [, force] = React.useReducer((x: number) => x + 1, 0);
+    return (
+        <ScrollView style={{ flex: 1, padding: 16 }}>
+            <Text style={{ color: "#fff", fontSize: 16, fontWeight: "700", marginBottom: 8 }}>
+                Discovery log
+            </Text>
+            <Text style={{ color: "#b5bac1", marginBottom: 12 }}>
+                Open Server Settings → Roles → Create Role, come back here, press Refresh, then send me this list.
+            </Text>
+            <TouchableOpacity onPress={force} style={{ backgroundColor: "#5865F2", padding: 10, borderRadius: 8, marginBottom: 8 }}>
+                <Text style={{ color: "#fff", textAlign: "center", fontWeight: "700" }}>Refresh</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+                onPress={() => { try { clipboard.setString(discovered.join("\n")); showToast("Copied"); } catch {} }}
+                style={{ backgroundColor: "#4e5058", padding: 10, borderRadius: 8, marginBottom: 12 }}
+            >
+                <Text style={{ color: "#fff", textAlign: "center", fontWeight: "700" }}>Copy all</Text>
+            </TouchableOpacity>
+            {discovered.length === 0 && <Text style={{ color: "#b5bac1" }}>Nothing recorded yet.</Text>}
+            {discovered.map((l, i) => (
+                <Text key={i} style={{ color: "#dbdee1", fontSize: 12, marginBottom: 4 }}>{l}</Text>
+            ))}
+        </ScrollView>
+    );
+}
+
 let patches: (() => void)[] = [];
 
 export default {
+    settings: Settings,
     onLoad() {
         // Patch the role edit action sheet / screen
+        // discovery: every lazy sheet key
+        patches.push(after("openLazy", ActionSheet, ([, key]) => { record("openLazy", String(key)); }));
+
+        // discovery: every rendered component whose name looks role-related
+        try {
+            patches.push(after("createElement", React, ([type]: any[]) => {
+                const n = nameOf(type);
+                if (n && NAME_FILTER.test(n)) record("component", n);
+            }));
+        } catch (e) { logger.error("[RoleUtilities] createElement patch failed", e); }
+        try {
+            const jsxRt = findByProps("jsx", "jsxs");
+            if (jsxRt) {
+                for (const fn of ["jsx", "jsxs"]) {
+                    patches.push(after(fn, jsxRt, ([type]: any[]) => {
+                        const n = nameOf(type);
+                        if (n && NAME_FILTER.test(n)) record("component", n);
+                    }));
+                }
+            }
+        } catch (e) { logger.error("[RoleUtilities] jsx patch failed", e); }
+
         const unpatch = after("openLazy", ActionSheet, ([comp, args, ctx]) => {
             if (args !== "GuildRoleEditActionSheet" && args !== "RoleEditActionSheet") return;
 
